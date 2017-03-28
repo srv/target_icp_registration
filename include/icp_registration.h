@@ -20,6 +20,9 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
 
 #include <boost/lexical_cast.hpp>
 
@@ -40,10 +43,16 @@ class IcpRegistration {
                  bool &converged,
                  double &score);
 
-  void filter(PointCloud::Ptr cloud, const bool& passthrough = false);
+  void filter(PointCloud::Ptr cloud,
+              const bool& passthrough = false,
+              const bool& statistical = false);
+
+  void removeGround(PointCloud::Ptr cloud, const ros::Time& stamp);
 
   void publish(const tf::Transform& cam_to_target,
-               const std_msgs::Header& header);
+               const ros::Time& stamp);
+
+  bool getRobot2Camera(const std::string& camera_frame_id);
 
   tf::Transform matrix4fToTf(const Eigen::Matrix4f& in);
 
@@ -63,11 +72,13 @@ class IcpRegistration {
 
   ros::Subscriber point_cloud_sub_;
   ros::Publisher dbg_reg_cloud_pub_;
+  ros::Publisher dbg_obj_cloud_pub_;
   ros::Publisher target_pose_pub_;
   ros::ServiceServer enable_srv_;
   ros::ServiceServer disable_srv_;
   tf::TransformBroadcaster tf_broadcaster_;
   tf::TransformListener tf_listener_;
+  tf::StampedTransform robot2camera_;
 
   // Params
   double min_range_;
@@ -75,9 +86,9 @@ class IcpRegistration {
   double voxel_size_;
   std::string target_file_;
   std::string target_frame_id_;
+  std::string robot_frame_id_;
   std::string world_frame_id_;
-  bool save_in_clouds_;
-  std::string save_dir_;
+  bool remove_ground_;
 
   // Operational variables
   PointCloud::Ptr original_target_;
@@ -86,6 +97,7 @@ class IcpRegistration {
   int in_clouds_num_;
   tf::Transform last_pose_;
   ros::Time last_detection_;
+  bool robot2camera_init_;
 
 };
 

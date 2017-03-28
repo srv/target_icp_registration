@@ -3,22 +3,25 @@
 
 IcpRegistration::IcpRegistration() :
   nh_private_("~"), original_target_(new PointCloud), target_readed_(false),
-  enable_(false), in_clouds_num_(0), last_detection_(ros::Time(-100)) {
+  enable_(false), in_clouds_num_(0), last_detection_(ros::Time(-100)),
+  robot2camera_init_(false) {
   // Read params
-  nh_private_.param("min_range",        min_range_,       0.5);
-  nh_private_.param("max_range",        max_range_,       4.5);
-  nh_private_.param("voxel_size",       voxel_size_,      0.015);
+  nh_private_.param("min_range",        min_range_,       1.0);
+  nh_private_.param("max_range",        max_range_,       2.0);
+  nh_private_.param("voxel_size",       voxel_size_,      0.02);
   nh_private_.param("target",           target_file_,     std::string(""));
+  nh_private_.param("robot_frame_id",   robot_frame_id_,  std::string("robot"));
   nh_private_.param("world_frame_id",   world_frame_id_,  std::string("world"));
   nh_private_.param("target_frame_id",  target_frame_id_, std::string("target"));
-  nh_private_.param("save_in_clouds",   save_in_clouds_,  false);
-  nh_private_.param("save_dir",         save_dir_,        std::string("~/icp_registration"));
+  nh_private_.param("remove_ground",    remove_ground_,   true);
 
   // Subscribers and publishers
   point_cloud_sub_ = nh_.subscribe(
     "input_cloud", 1, &IcpRegistration::pointCloudCb, this);
   dbg_reg_cloud_pub_ = nh_private_.advertise<sensor_msgs::PointCloud2>(
     "dbg_reg_cloud", 1);
+  dbg_obj_cloud_pub_ = nh_private_.advertise<sensor_msgs::PointCloud2>(
+    "dbg_obj_cloud", 1);
   target_pose_pub_ = nh_private_.advertise<geometry_msgs::PoseStamped>(
     "target_pose", 1);
 
@@ -30,6 +33,21 @@ IcpRegistration::IcpRegistration() :
 }
 
 void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_cloud) {
+  if (!target_readed_) {
+    ROS_INFO_STREAM("[IcpRegistration]: Loading target for the first time...");
+
+    // Opening target
+    if (pcl::io::loadPCDFile<Point>(target_file_, *original_target_) == -1) {
+      ROS_ERROR_STREAM("[IcpRegistration]: Couldn't read file " <<
+        target_file_);
+      return;
+    }
+
+    // Filter target
+    filter(original_target_);
+    target_readed_ = true;
+  }
+
   if (!enable_) {
     ROS_INFO_THROTTLE(15, "[IcpRegistration]: Not enabled.");
     return;
@@ -44,36 +62,23 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
     return;
   }
 
-  if (save_in_clouds_) {
-    std::string filename = save_dir_ + "/cloud_" +
-      boost::lexical_cast<std::string>(in_clouds_num_) + ".pcd";
-    pcl::io::savePCDFileBinary(filename, *cloud);
-    in_clouds_num_++;
+  // Translate the cloud to the robot frame id to remove the camera orientation effect
+  if (!robot2camera_init_) {
+    bool ok = getRobot2Camera(in_cloud->header.frame_id);
+    if (!ok) return;
   }
+  move(cloud, robot2camera_);
 
   // Filter input cloud
-  filter(cloud);
+  filter(cloud, true, true);
 
-  if (!target_readed_) {
-    ROS_INFO_STREAM("[IcpRegistration]: Loading target for the first time...");
-
-    // Opening target
-    if (pcl::io::loadPCDFile<Point>(target_file_, *original_target_) == -1) {
-      ROS_ERROR_STREAM("[IcpRegistration]: Couldn't read file " <<
-        target_file_);
-      return;
-    }
-
-    // Filter target
-    filter(original_target_, false);
-    target_readed_ = true;
-  }
-
-  PointCloud::Ptr target(new PointCloud);
-  pcl::copyPointCloud(*original_target_, *target);
+  // Remove ground
+  if (remove_ground_)
+    removeGround(cloud, in_cloud->header.stamp);
 
   // Move target
-  tf::Transform tmp_pose;
+  PointCloud::Ptr target(new PointCloud);
+  pcl::copyPointCloud(*original_target_, *target);
   double elapsed = fabs(last_detection_.toSec() - ros::Time::now().toSec());
   if (elapsed > 2.0) {
     // Move to center
@@ -103,7 +108,7 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
     last_detection_ = ros::Time::now();
 
     // Publish tf and message
-    publish(last_pose_, in_cloud->header);
+    publish(last_pose_, in_cloud->header.stamp);
 
     // Debug cloud
     if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
@@ -126,7 +131,8 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
       // Publish
       sensor_msgs::PointCloud2 dbg_cloud_ros;
       toROSMsg(*dbg_cloud, dbg_cloud_ros);
-      dbg_cloud_ros.header = in_cloud->header;
+      dbg_cloud_ros.header.stamp = in_cloud->header.stamp;
+      dbg_cloud_ros.header.frame_id = robot_frame_id_;
       dbg_reg_cloud_pub_.publish(dbg_cloud_ros);
     }
   } else {
@@ -142,7 +148,8 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
     // Publish
     sensor_msgs::PointCloud2 dbg_cloud_ros;
     toROSMsg(*dbg_cloud, dbg_cloud_ros);
-    dbg_cloud_ros.header = in_cloud->header;
+    dbg_cloud_ros.header.stamp = in_cloud->header.stamp;
+    dbg_cloud_ros.header.frame_id = robot_frame_id_;
     dbg_reg_cloud_pub_.publish(dbg_cloud_ros);
   }
 }
@@ -161,7 +168,7 @@ void IcpRegistration::pairAlign(PointCloud::Ptr src,
   icp.setRANSACOutlierRejectionThreshold(0.001);
   icp.setTransformationEpsilon(0.00001);
   icp.setEuclideanFitnessEpsilon(0.001);
-  icp.setMaximumIterations(80);
+  icp.setMaximumIterations(50);
   icp.setInputSource(src);
   icp.setInputTarget(tgt);
   icp.align(*aligned);
@@ -174,7 +181,9 @@ void IcpRegistration::pairAlign(PointCloud::Ptr src,
   score = icp.getFitnessScore();
 }
 
-void IcpRegistration::filter(PointCloud::Ptr cloud, const bool& passthrough) {
+void IcpRegistration::filter(PointCloud::Ptr cloud,
+                             const bool& passthrough,
+                             const bool& statistical) {
   std::vector<int> indicies;
   pcl::removeNaNFromPointCloud(*cloud, *cloud, indicies);
 
@@ -191,38 +200,82 @@ void IcpRegistration::filter(PointCloud::Ptr cloud, const bool& passthrough) {
   grid.setDownsampleAllData(true);
   grid.setInputCloud(cloud);
   grid.filter(*cloud);
+
+  if (statistical) {
+    pcl::RadiusOutlierRemoval<Point> outrem;
+    outrem.setInputCloud(cloud);
+    outrem.setRadiusSearch(0.2);
+    outrem.setMinNeighborsInRadius(100);
+    outrem.filter(*cloud);
+  }
+}
+
+void IcpRegistration::removeGround(PointCloud::Ptr cloud, const ros::Time& stamp) {
+  pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
+  pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
+  pcl::SACSegmentation<Point> seg;
+  seg.setOptimizeCoefficients(true);
+  seg.setModelType(pcl::SACMODEL_PLANE);
+  seg.setMethodType(pcl::SAC_RANSAC);
+  seg.setDistanceThreshold(0.05);
+  seg.setInputCloud(cloud);
+  seg.segment(*inliers, *coefficients);
+
+  PointCloud::Ptr ground(new PointCloud);
+  PointCloud::Ptr objects(new PointCloud);
+  for (int i=0; i < (int)cloud->size(); i++) {
+    if (std::find(inliers->indices.begin(), inliers->indices.end(), i) == inliers->indices.end()) {
+      objects->push_back(cloud->points[i]);
+    } else {
+      ground->push_back(cloud->points[i]);
+    }
+  }
+  pcl::copyPointCloud(*objects, *cloud);
+
+  if (dbg_obj_cloud_pub_.getNumSubscribers() > 0) {
+    for (uint i=0; i < objects->size(); i++) {
+      objects->points[i].r = 255;
+      objects->points[i].g = 0;
+      objects->points[i].b = 0;
+    }
+    *ground += *objects;
+    sensor_msgs::PointCloud2 dbg_cloud_ros;
+    toROSMsg(*ground, dbg_cloud_ros);
+    dbg_cloud_ros.header.stamp = stamp;
+    dbg_cloud_ros.header.frame_id = robot_frame_id_;
+    dbg_obj_cloud_pub_.publish(dbg_cloud_ros);
+  }
 }
 
 void IcpRegistration::publish(const tf::Transform& cam_to_target,
-             const std_msgs::Header& header) {
+                              const ros::Time& stamp) {
   // Publish tf
   tf_broadcaster_.sendTransform(
     tf::StampedTransform(cam_to_target,
-                         header.stamp,
-                         header.frame_id,
+                         stamp,
+                         robot_frame_id_,
                          target_frame_id_));
 
   // Publish geometry message from world frame id
   if (target_pose_pub_.getNumSubscribers() > 0) {
     try {
       ros::Time now = ros::Time::now();
-      tf::StampedTransform world2camera;
+      tf::StampedTransform world2robot;
       tf_listener_.waitForTransform(world_frame_id_,
-                                    header.frame_id,
+                                    robot_frame_id_,
                                     now, ros::Duration(1.0));
       tf_listener_.lookupTransform(world_frame_id_,
-          header.frame_id, now, world2camera);
+          robot_frame_id_, now, world2robot);
 
       // Compose the message
       geometry_msgs::PoseStamped pose_stamped;
-      tf::Transform world2target = world2camera * cam_to_target;
+      tf::Transform world2target = world2robot * cam_to_target;
       pose_stamped.pose.position.x = world2target.getOrigin().x();
       pose_stamped.pose.position.y = world2target.getOrigin().y();
       pose_stamped.pose.position.z = world2target.getOrigin().z();
-      pose_stamped.header.stamp = header.stamp;
+      pose_stamped.header.stamp = stamp;
       pose_stamped.header.frame_id = world_frame_id_;
       target_pose_pub_.publish(pose_stamped);
-
     } catch (tf::TransformException ex) {
       ROS_WARN_STREAM("[IcpRegistration]: Cannot find the tf between " <<
         "world frame id and camera. " << ex.what());
@@ -247,7 +300,8 @@ tf::Transform IcpRegistration::matrix4fToTf(const Eigen::Matrix4f& in) {
   return out;
 }
 
-void IcpRegistration::move(const PointCloud::Ptr& cloud, const tf::Transform& trans) {
+void IcpRegistration::move(const PointCloud::Ptr& cloud,
+                           const tf::Transform& trans) {
   Eigen::Affine3d trans_eigen;
   transformTFToEigen(trans, trans_eigen);
   pcl::transformPointCloud(*cloud, *cloud, trans_eigen);
@@ -257,6 +311,23 @@ double IcpRegistration::eucl(const tf::Transform& a, const tf::Transform& b) {
   return sqrt( (a.getOrigin().x() - b.getOrigin().x())*(a.getOrigin().x() - b.getOrigin().x()) +
                (a.getOrigin().y() - b.getOrigin().y())*(a.getOrigin().y() - b.getOrigin().y()) +
                (a.getOrigin().z() - b.getOrigin().z())*(a.getOrigin().z() - b.getOrigin().z()) );
+}
+
+bool IcpRegistration::getRobot2Camera(const std::string& camera_frame_id) {
+  try {
+    ros::Time now = ros::Time::now();
+    tf_listener_.waitForTransform(robot_frame_id_,
+                                  camera_frame_id,
+                                  now, ros::Duration(1.0));
+    tf_listener_.lookupTransform(robot_frame_id_,
+        camera_frame_id, now, robot2camera_);
+    robot2camera_init_ = true;
+    return true;
+  } catch (tf::TransformException ex) {
+    ROS_WARN_STREAM("[IcpRegistration]: Cannot find the tf between " <<
+      "robot frame id and camera. " << ex.what());
+    return false;
+  }
 }
 
 bool IcpRegistration::enable(std_srvs::Empty::Request& req,
