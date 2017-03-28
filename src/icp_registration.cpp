@@ -16,6 +16,8 @@
 #include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/radius_outlier_removal.h>
 
+#include <boost/lexical_cast.hpp>
+
 typedef pcl::PointXYZ Point;
 typedef pcl::PointXYZRGB PointRGB;
 typedef pcl::PointCloud<Point> PointCloud;
@@ -38,21 +40,26 @@ class IcpRegistration {
   double voxel_size_;
   std::string target_file_;
   std::string target_frame_id_;
+  bool save_in_clouds_;
+  std::string save_dir_;
 
   // Operational variables
   PointCloud::Ptr original_target_;
   bool target_readed_;
   bool enable_;
+  int in_clouds_num_;
 
  public:
   IcpRegistration() : nh_private_("~"), original_target_(new PointCloud),
-                      target_readed_(false), enable_(false) {
+                      target_readed_(false), enable_(false), in_clouds_num_(0) {
     // Read params
     nh_private_.param("min_range",        min_range_,       0.5);
     nh_private_.param("max_range",        max_range_,       4.5);
     nh_private_.param("voxel_size",       voxel_size_,      0.015);
     nh_private_.param("target",           target_file_,     std::string(""));
     nh_private_.param("target_frame_id",  target_frame_id_, std::string("target"));
+    nh_private_.param("save_in_clouds",   save_in_clouds_,  false);
+    nh_private_.param("save_dir",         save_dir_,        std::string("~/icp_registration"));
 
     // Subscribers and publishers
     point_cloud_sub_ = nh_.subscribe(
@@ -80,6 +87,13 @@ class IcpRegistration {
     if (cloud->points.size() < 100) {
       ROS_WARN("[IcpRegistration]: Input cloud has less than 100 points.");
       return;
+    }
+
+    if (save_in_clouds_) {
+      pcl::io::savePCDFileBinary(
+        save_dir_ + "cloud_" + boost::lexical_cast<std::string>(in_clouds_num_)
+        + ".pcd", *cloud);
+      in_clouds_num_++;
     }
 
     // Filter input cloud
