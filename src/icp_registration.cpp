@@ -53,10 +53,13 @@ class IcpRegistration {
   bool target_readed_;
   bool enable_;
   int in_clouds_num_;
+  tf::Transform last_pose_;
+  ros::Time last_detection_;
 
  public:
   IcpRegistration() : nh_private_("~"), original_target_(new PointCloud),
-                      target_readed_(false), enable_(false), in_clouds_num_(0) {
+                      target_readed_(false), enable_(false), in_clouds_num_(0),
+                      last_detection_(ros::Time(-100)) {
     // Read params
     nh_private_.param("min_range",        min_range_,       0.5);
     nh_private_.param("max_range",        max_range_,       4.5);
@@ -125,27 +128,38 @@ class IcpRegistration {
     PointCloud::Ptr target(new PointCloud);
     pcl::copyPointCloud(*original_target_, *target);
 
-    // Move to center
-    Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*cloud, centroid);
-    tf::Transform tf_01;
-    tf_01.setIdentity();
-    tf_01.setOrigin(tf::Vector3(centroid[0], centroid[1], centroid[2]));
-    move(target, tf_01);
+    // Move target
+    tf::Transform tmp_pose;
+    double elapsed = fabs(last_detection_.toSec() - ros::Time::now().toSec());
+    if (elapsed > 2.0) {
+      // Move to center
+      Eigen::Vector4f centroid;
+      pcl::compute3DCentroid(*cloud, centroid);
+      tf::Transform tf_01;
+      tf_01.setIdentity();
+      tf_01.setOrigin(tf::Vector3(centroid[0], centroid[1], centroid[2]));
+      move(target, tf_01);
+      last_pose_ = tf_01;
+    } else {
+      // Move to last detected position
+      move(target, last_pose_);
+    }
 
     // Registration
     bool converged;
     double score;
     tf::Transform target_pose;
     pairAlign(target, cloud, target_pose, converged, score);
-    double dist = eucl(tf_01, target_pose);
+    double dist = eucl(last_pose_, target_pose);
     if (converged && dist < 2.0 && score < 0.0001) {
       ROS_INFO_STREAM("[IcpRegistration]: Target found with score of " <<
-        score << ", and a distance to pointcloud center of " <<
-        dist << "m.");
+        score);
+
+      last_pose_ = target_pose * last_pose_;
+      last_detection_ = ros::Time::now();
 
       // Publish tf and message
-      publish(target_pose*tf_01, in_cloud->header);
+      publish(last_pose_, in_cloud->header);
 
       // Debug cloud
       if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
