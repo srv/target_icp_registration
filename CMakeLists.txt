@@ -14,10 +14,12 @@ find_package(PCL 1.7 REQUIRED)
 
 catkin_package()
 
-include_directories(${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+include_directories(include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
 # Executables
-add_executable(icp_registration src/icp_registration.cpp)
+add_executable(icp_registration
+               src/icp_registration_node.cpp
+               src/icp_registration.cpp)
 target_link_libraries (icp_registration ${PCL_LIBRARIES} ${catkin_LIBRARIES})
