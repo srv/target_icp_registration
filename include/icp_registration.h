@@ -23,10 +23,8 @@
 
 #include <boost/lexical_cast.hpp>
 
-typedef pcl::PointXYZ Point;
-typedef pcl::PointXYZRGB PointRGB;
+typedef pcl::PointXYZRGB Point;
 typedef pcl::PointCloud<Point> PointCloud;
-typedef pcl::PointCloud<PointRGB> PointCloudRGB;
 typedef pcl::IterativeClosestPoint<Point, Point> IterativeClosestPoint;
 
 class IcpRegistration {

@@ -107,17 +107,18 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
 
     // Debug cloud
     if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
-      PointCloudRGB::Ptr dbg_cloud(new PointCloudRGB);
+      PointCloud::Ptr dbg_cloud(new PointCloud);
       pcl::copyPointCloud(*cloud, *dbg_cloud);
 
       // Add target to debug cloud
       move(target, target_pose);
 
-      PointCloudRGB::Ptr target_color(new PointCloudRGB);
+      PointCloud::Ptr target_color(new PointCloud);
       for (uint i=0; i < target->size(); i++) {
-        Point p = target->points[i];
-        PointRGB prgb(0, 255, 0);
-        prgb.x = p.x; prgb.y = p.y; prgb.z = p.z;
+        Point prgb(0, 255, 0);
+        prgb.x = target->points[i].x;
+        prgb.y = target->points[i].y;
+        prgb.z = target->points[i].z;
         target_color->push_back(prgb);
       }
       *dbg_cloud += *target_color;
@@ -135,7 +136,7 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
 
   // Publish debug cloud
   if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
-    PointCloudRGB::Ptr dbg_cloud(new PointCloudRGB);
+    PointCloud::Ptr dbg_cloud(new PointCloud);
     pcl::copyPointCloud(*cloud, *dbg_cloud);
 
     // Publish
