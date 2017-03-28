@@ -1,8 +1,10 @@
 #include <ros/ros.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
+#include <tf/transform_listener.h>
 #include <tf_conversions/tf_eigen.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <std_srvs/Empty.h>
 
 #include <pcl_ros/point_cloud.h>
@@ -30,9 +32,11 @@ class IcpRegistration {
 
   ros::Subscriber point_cloud_sub_;
   ros::Publisher dbg_reg_cloud_pub_;
+  ros::Publisher target_pose_pub_;
   ros::ServiceServer enable_srv_;
   ros::ServiceServer disable_srv_;
   tf::TransformBroadcaster tf_broadcaster_;
+  tf::TransformListener tf_listener_;
 
   // Params
   double min_range_;
@@ -40,6 +44,7 @@ class IcpRegistration {
   double voxel_size_;
   std::string target_file_;
   std::string target_frame_id_;
+  std::string world_frame_id_;
   bool save_in_clouds_;
   std::string save_dir_;
 
@@ -57,6 +62,7 @@ class IcpRegistration {
     nh_private_.param("max_range",        max_range_,       4.5);
     nh_private_.param("voxel_size",       voxel_size_,      0.015);
     nh_private_.param("target",           target_file_,     std::string(""));
+    nh_private_.param("world_frame_id",   world_frame_id_,  std::string("world"));
     nh_private_.param("target_frame_id",  target_frame_id_, std::string("target"));
     nh_private_.param("save_in_clouds",   save_in_clouds_,  false);
     nh_private_.param("save_dir",         save_dir_,        std::string("~/icp_registration"));
@@ -66,6 +72,8 @@ class IcpRegistration {
       "input_cloud", 1, &IcpRegistration::pointCloudCb, this);
     dbg_reg_cloud_pub_ = nh_private_.advertise<sensor_msgs::PointCloud2>(
       "dbg_reg_cloud", 1);
+    target_pose_pub_ = nh_private_.advertise<geometry_msgs::PoseStamped>(
+      "target_pose", 1);
 
     // Services
     enable_srv_ = nh_private_.advertiseService("enable",
@@ -90,9 +98,9 @@ class IcpRegistration {
     }
 
     if (save_in_clouds_) {
-      pcl::io::savePCDFileBinary(
-        save_dir_ + "cloud_" + boost::lexical_cast<std::string>(in_clouds_num_)
-        + ".pcd", *cloud);
+      std::string filename = save_dir_ + "/cloud_" +
+        boost::lexical_cast<std::string>(in_clouds_num_) + ".pcd";
+      pcl::io::savePCDFileBinary(filename, *cloud);
       in_clouds_num_++;
     }
 
@@ -136,13 +144,8 @@ class IcpRegistration {
         score << ", and a distance to pointcloud center of " <<
         dist << "m.");
 
-      // Publish tf
-      tf::Transform cam_to_target = target_pose * tf_01;
-      tf_broadcaster_.sendTransform(
-        tf::StampedTransform(cam_to_target,
-                             in_cloud->header.stamp,
-                             in_cloud->header.frame_id,
-                             target_frame_id_));
+      // Publish tf and message
+      publish(target_pose*tf_01, in_cloud->header);
 
       // Debug cloud
       if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
@@ -230,6 +233,43 @@ class IcpRegistration {
     grid.setDownsampleAllData(true);
     grid.setInputCloud(cloud);
     grid.filter(*cloud);
+  }
+
+  void publish(const tf::Transform& cam_to_target,
+               const std_msgs::Header& header) {
+    // Publish tf
+    tf_broadcaster_.sendTransform(
+      tf::StampedTransform(cam_to_target,
+                           header.stamp,
+                           header.frame_id,
+                           target_frame_id_));
+
+    // Publish geometry message from world frame id
+    if (target_pose_pub_.getNumSubscribers() > 0) {
+      try {
+        ros::Time now = ros::Time::now();
+        tf::StampedTransform world2camera;
+        tf_listener_.waitForTransform(world_frame_id_,
+                                      header.frame_id,
+                                      now, ros::Duration(1.0));
+        tf_listener_.lookupTransform(world_frame_id_,
+            header.frame_id, now, world2camera);
+
+        // Compose the message
+        geometry_msgs::PoseStamped pose_stamped;
+        tf::Transform world2target = world2camera * cam_to_target;
+        pose_stamped.pose.position.x = world2target.getOrigin().x();
+        pose_stamped.pose.position.y = world2target.getOrigin().y();
+        pose_stamped.pose.position.z = world2target.getOrigin().z();
+        pose_stamped.header.stamp = header.stamp;
+        pose_stamped.header.frame_id = world_frame_id_;
+        target_pose_pub_.publish(pose_stamped);
+
+      } catch (tf::TransformException ex) {
+        ROS_WARN_STREAM("[IcpRegistration]: Cannot find the tf between " <<
+          "world frame id and camera. " << ex.what());
+      }
+    }
   }
 
   tf::Transform matrix4fToTf(Eigen::Matrix4f in) {
