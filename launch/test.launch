@@ -1,0 +1,23 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="bagfile" default="/home/plnegre/bagfiles/stereo.bag" />
+  <arg name="camera" default="/stereo_forward"/>
+  <param name="use_sim_time" value="true" />
+
+  <node pkg="rosbag" type="play" name="player" args="--clock $(arg bagfile) --l"/>
+
+  <!-- STEREO IMAGE PROC 2 RECTIFY -->
+  <node ns="$(arg camera)" pkg="stereo_image_proc" type="stereo_image_proc" name="stereo_image_proc" >
+    <rosparam file="$(find target_icp_registration)/config/disparity_params_stereo.yaml"/>
+  </node>
+
+  <!--Object Detection-->
+  <node pkg="target_icp_registration" type="icp_registration" name="icp_registration" output="screen">
+
+    <remap from="/input_cloud" to="/$(arg camera)/points2"/>
+    <param name="target" value= "$(find target_icp_registration)/targets/vertices14_z0_filt0.pcd"/>
+
+  </node>
+
+</launch>
+

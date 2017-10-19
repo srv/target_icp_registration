@@ -1,0 +1,20 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="camera" default="/stereo_camera/scaled_x2"/>
+
+  <!--Object Detection-->
+  <node pkg="target_icp_registration" type="icp_registration" name="icp_registration" output="screen">
+
+    <remap from="/input_cloud" to="/$(arg camera)/points2"/>
+
+    <param name="max_icp_dist" value="2.5"/>
+    <param name="max_icp_score" value="0.0001"/>
+    <param name="robot_frame_id" value="girona500"/>
+    <param name="target_frame_id" value="target_test"/>
+
+    <param name="target" value= "$(find target_icp_registration)/targets/vertices14_z0_filt0.pcd"/>
+
+  </node>
+
+</launch>
+
