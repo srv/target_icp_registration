@@ -9,11 +9,14 @@ IcpRegistration::IcpRegistration() :
   nh_private_.param("min_range",        min_range_,       1.0);
   nh_private_.param("max_range",        max_range_,       2.0);
   nh_private_.param("voxel_size",       voxel_size_,      0.02);
-  nh_private_.param("target",           target_file_,     std::string(""));
+  nh_private_.param("target",           target_file_,     std::string("target.pcd"));
   nh_private_.param("robot_frame_id",   robot_frame_id_,  std::string("robot"));
   nh_private_.param("world_frame_id",   world_frame_id_,  std::string("world"));
   nh_private_.param("target_frame_id",  target_frame_id_, std::string("target"));
   nh_private_.param("remove_ground",    remove_ground_,   true);
+  nh_private_.param("ground_height",    ground_height_,   0.09);
+  nh_private_.param("max_icp_dist",     max_icp_dist_,    2.0);
+  nh_private_.param("max_icp_score",    max_icp_score_,   0.0001);
 
   // Subscribers and publishers
   point_cloud_sub_ = nh_.subscribe(
@@ -54,8 +57,10 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
   }
 
   // Copy
+  PointCloud::Ptr original(new PointCloud);
   PointCloud::Ptr cloud(new PointCloud);
   fromROSMsg(*in_cloud, *cloud);
+  fromROSMsg(*in_cloud, *original);
 
   if (cloud->points.size() < 100) {
     ROS_WARN("[IcpRegistration]: Input cloud has less than 100 points.");
@@ -75,6 +80,11 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
   // Remove ground
   if (remove_ground_)
     removeGround(cloud, in_cloud->header.stamp);
+
+  if (cloud->points.size() < 100) {
+    ROS_WARN("[IcpRegistration]: Input cloud has not enough points after filtering.");
+    return;
+  }
 
   // Move target
   PointCloud::Ptr target(new PointCloud);
@@ -100,7 +110,11 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
   tf::Transform target_pose;
   pairAlign(target, cloud, target_pose, converged, score);
   double dist = eucl(last_pose_, target_pose);
-  if (converged && dist < 2.0 && score < 0.0001) {
+  if (converged) {
+    ROS_INFO_STREAM("[IcpRegistration]: Icp converged. Score: " <<
+      score << ". Dist: " << dist);
+  }
+  if (converged && dist < max_icp_dist_ && score < max_icp_score_) {
     ROS_INFO_STREAM("[IcpRegistration]: Target found with score of " <<
       score);
 
@@ -112,8 +126,9 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
 
     // Debug cloud
     if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
+      move(original, robot2camera_);
       PointCloud::Ptr dbg_cloud(new PointCloud);
-      pcl::copyPointCloud(*cloud, *dbg_cloud);
+      pcl::copyPointCloud(*original, *dbg_cloud);
 
       // Add target to debug cloud
       move(target, target_pose);
@@ -142,8 +157,9 @@ void IcpRegistration::pointCloudCb(const sensor_msgs::PointCloud2::ConstPtr& in_
 
   // Publish debug cloud
   if (dbg_reg_cloud_pub_.getNumSubscribers() > 0) {
+    move(original, robot2camera_);
     PointCloud::Ptr dbg_cloud(new PointCloud);
-    pcl::copyPointCloud(*cloud, *dbg_cloud);
+    pcl::copyPointCloud(*original, *dbg_cloud);
 
     // Publish
     sensor_msgs::PointCloud2 dbg_cloud_ros;
@@ -168,7 +184,7 @@ void IcpRegistration::pairAlign(PointCloud::Ptr src,
   icp.setRANSACOutlierRejectionThreshold(0.001);
   icp.setTransformationEpsilon(0.00001);
   icp.setEuclideanFitnessEpsilon(0.001);
-  icp.setMaximumIterations(50);
+  icp.setMaximumIterations(100);
   icp.setInputSource(src);
   icp.setInputTarget(tgt);
   icp.align(*aligned);
@@ -214,13 +230,13 @@ void IcpRegistration::removeGround(PointCloud::Ptr cloud, const ros::Time& stamp
   pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
   pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
   pcl::SACSegmentation<Point> seg;
-  seg.setOptimizeCoefficients(true);
   seg.setModelType(pcl::SACMODEL_PLANE);
   seg.setMethodType(pcl::SAC_RANSAC);
-  seg.setDistanceThreshold(0.05);
+  seg.setDistanceThreshold(ground_height_);
   seg.setInputCloud(cloud);
   seg.segment(*inliers, *coefficients);
 
+  double mean_z;
   PointCloud::Ptr ground(new PointCloud);
   PointCloud::Ptr objects(new PointCloud);
   for (int i=0; i < (int)cloud->size(); i++) {
@@ -228,17 +244,27 @@ void IcpRegistration::removeGround(PointCloud::Ptr cloud, const ros::Time& stamp
       objects->push_back(cloud->points[i]);
     } else {
       ground->push_back(cloud->points[i]);
+      mean_z += cloud->points[i].z;
     }
   }
-  pcl::copyPointCloud(*objects, *cloud);
+  mean_z = mean_z / ground->size();
+
+  // Filter outliers in the objects
+  PointCloud::Ptr object_inliers(new PointCloud);
+  for (uint i=0; i < objects->size(); i++) {
+    if ( fabs(objects->points[i].z - mean_z) < 0.35)
+      object_inliers->push_back(objects->points[i]);
+  }
+
+  pcl::copyPointCloud(*object_inliers, *cloud);
 
   if (dbg_obj_cloud_pub_.getNumSubscribers() > 0) {
-    for (uint i=0; i < objects->size(); i++) {
-      objects->points[i].r = 255;
-      objects->points[i].g = 0;
-      objects->points[i].b = 0;
+    for (uint i=0; i < object_inliers->size(); i++) {
+      object_inliers->points[i].r = 255;
+      object_inliers->points[i].g = 0;
+      object_inliers->points[i].b = 0;
     }
-    *ground += *objects;
+    *ground += *object_inliers;
     sensor_msgs::PointCloud2 dbg_cloud_ros;
     toROSMsg(*ground, dbg_cloud_ros);
     dbg_cloud_ros.header.stamp = stamp;

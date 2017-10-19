@@ -89,6 +89,9 @@ class IcpRegistration {
   std::string robot_frame_id_;
   std::string world_frame_id_;
   bool remove_ground_;
+  double ground_height_;
+  double max_icp_dist_;
+  double max_icp_score_;
 
   // Operational variables
   PointCloud::Ptr original_target_;
